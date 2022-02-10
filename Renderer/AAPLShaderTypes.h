@@ -23,6 +23,10 @@ typedef enum AAPLVertexInputIndex
 typedef enum AAPLTextureIndex
 {
     AAPLTextureIndexBaseColor = 0,
+    
+    AAPLTexRedChannel = 1,
+    AAPLTexGreenChannel = 2,
+    AAPLTexBlueChannel = 3,
 } AAPLTextureIndex;
 
 //  This structure defines the layout of each vertex in the array of vertices set as an input to the
@@ -39,4 +43,12 @@ typedef struct
     vector_float2 textureCoordinate;
 } AAPLVertex;
 
+
+typedef struct{
+    matrix_float4x4 ccmMat;
+    vector_float4 shifts3f[16];
+    vector_float4 slopes3f[16];
+    vector_float4 mixWeight3f;
+    vector_float4 mixBias1f;
+} AAPLFragParams;
 #endif /* AAPLShaderTypes_h */

@@ -14,6 +14,9 @@ Implementation of renderer class which performs Metal setup and per frame render
 // Header shared between C code here, which executes Metal API commands, and .metal files, which
 //   uses these types as inputs to the shaders
 #import "AAPLShaderTypes.h"
+#include "hdrSlider.h"
+
+#define  UseHdrProFlag   1
 
 // Main class performing the rendering
 @implementation AAPLRenderer
@@ -29,9 +32,19 @@ Implementation of renderer class which performs Metal setup and per frame render
     // The Metal texture object
     id<MTLTexture> _texture;
 
+    // 3D texture rChannel
+    id<MTLTexture> _rChannelTex;
+    id<MTLTexture> _gChannelTex;
+    id<MTLTexture> _bChannelTex;
+    // for sampling 3D texture's sampler state
+    id<MTLSamplerState> _samplerState;
+    
     // The Metal buffer that holds the vertex data.
     id<MTLBuffer> _vertices;
 
+    // hold the 3d params
+    id<MTLBuffer> _fragParams;
+    
     // The number of vertices in the vertex buffer.
     NSUInteger _numVertices;
 
@@ -74,6 +87,49 @@ Implementation of renderer class which performs Metal setup and per frame render
     return texture;
 }
 
+- (void) CreateSamplerState{
+    MTLSamplerDescriptor* desc = [[MTLSamplerDescriptor alloc] init];
+    desc.sAddressMode = MTLSamplerAddressModeClampToEdge;
+    desc.tAddressMode = MTLSamplerAddressModeClampToEdge;
+    desc.rAddressMode = MTLSamplerAddressModeClampToEdge;
+    
+    desc.minFilter = MTLSamplerMinMagFilterLinear;
+    desc.magFilter = MTLSamplerMinMagFilterLinear;
+    desc.mipFilter = MTLSamplerMipFilterNotMipmapped;
+    desc.lodMinClamp = 0.0f;
+    desc.lodMaxClamp = FLT_MAX;
+    desc.maxAnisotropy = 1;
+    desc.normalizedCoordinates = YES;
+    
+    _samplerState = [_device newSamplerStateWithDescriptor:desc];
+}
+
+- (id<MTLTexture>) CreateRgbChannelTex: (float*)rgbData{
+    
+    MTLTextureDescriptor* texDesc = [[MTLTextureDescriptor alloc] init];
+    texDesc.textureType  = MTLTextureType3D;
+    texDesc.pixelFormat  = MTLPixelFormatRGBA32Float;
+    texDesc.width       = 16;
+    texDesc.height      = 16;
+    texDesc.depth       = 8;
+    texDesc.mipmapLevelCount  = 1;
+    texDesc.arrayLength      = 1;
+    texDesc.usage           = MTLTextureUsageShaderRead;
+    //texDesc.storageMode      = MTLStorageModeManaged;
+    
+    id<MTLTexture> tex = [_device newTextureWithDescriptor:texDesc];
+    
+    MTLRegion region = MTLRegionMake3D(0, 0, 0, 16, 16, 8);
+    [tex replaceRegion:region
+           mipmapLevel:0
+                 slice:0
+             withBytes:rgbData
+           bytesPerRow:256
+         bytesPerImage:4096];
+
+    return tex;
+}
+
 - (nonnull instancetype)initWithMetalKitView:(nonnull MTKView *)mtkView
 {
     self = [super init];
@@ -86,7 +142,28 @@ Implementation of renderer class which performs Metal setup and per frame render
         
         _texture = [self loadTextureUsingAAPLImage: imageFileLocation];
 
+        [self CreateSamplerState];
+        
+        _rChannelTex = [self CreateRgbChannelTex:redFloat_];
+        _gChannelTex = [self CreateRgbChannelTex:greenFloat_];
+        _bChannelTex = [self CreateRgbChannelTex:blueFloat_];
+        
+        
+        
         // Set up a simple MTLBuffer with vertices which include texture coordinates
+#if UseHdrProFlag
+        static const AAPLVertex quadVertices[] =
+        {
+            // Pixel positions, Texture coordinates
+            { {  250,  -250 },  { 1.f, 0.f } },//  右下
+            { { -250,  -250 },  { 0.f, 0.f } },// 左下
+            { { -250,   250 },  { 0.f, 1.f } },// 左上
+
+            { {  250,  -250 },  { 1.f, 0.f } }, // 右下
+            { { -250,   250 },  { 0.f, 1.f } }, // 左上
+            { {  250,   250 },  { 1.f, 1.f } }, // 右上
+        };
+#else
         static const AAPLVertex quadVertices[] =
         {
             // Pixel positions, Texture coordinates
@@ -98,7 +175,8 @@ Implementation of renderer class which performs Metal setup and per frame render
             { { -250,   250 },  { 0.f, 0.f } },
             { {  250,   250 },  { 1.f, 0.f } },
         };
-
+#endif
+        
         // Create a vertex buffer, and initialize it with the quadVertices array
         _vertices = [_device newBufferWithBytes:quadVertices
                                          length:sizeof(quadVertices)
@@ -107,13 +185,29 @@ Implementation of renderer class which performs Metal setup and per frame render
         // Calculate the number of vertices by dividing the byte length by the size of each vertex
         _numVertices = sizeof(quadVertices) / sizeof(AAPLVertex);
 
+        
+        static  AAPLFragParams threeDFragParams;
+        threeDFragParams.ccmMat = ccmMat;
+        threeDFragParams.mixWeight3f = mixWeight3f;
+        threeDFragParams.mixBias1f  = mixBias1f;
+        for(int i =0 ; i< 16 ;++i){
+            threeDFragParams.shifts3f[i] = shifts3f[i];
+            threeDFragParams.slopes3f[i]  = slopes3f[i];
+        }
+        _fragParams = [_device newBufferWithBytes:&threeDFragParams
+                                           length:sizeof(threeDFragParams)
+                                          options:MTLResourceStorageModeShared];
+        
         /// Create the render pipeline.
 
         // Load the shaders from the default library
         id<MTLLibrary> defaultLibrary = [_device newDefaultLibrary];
         id<MTLFunction> vertexFunction = [defaultLibrary newFunctionWithName:@"vertexShader"];
+#if UseHdrProFlag
+        id<MTLFunction> fragmentFunction = [defaultLibrary newFunctionWithName:@"frag3DSample"];
+#else
         id<MTLFunction> fragmentFunction = [defaultLibrary newFunctionWithName:@"samplingShader"];
-
+#endif
         // Set up a descriptor for creating a pipeline state object
         MTLRenderPipelineDescriptor *pipelineStateDescriptor = [[MTLRenderPipelineDescriptor alloc] init];
         pipelineStateDescriptor.label = @"Texturing Pipeline";
@@ -169,13 +263,26 @@ Implementation of renderer class which performs Metal setup and per frame render
         [renderEncoder setVertexBytes:&_viewportSize
                                length:sizeof(_viewportSize)
                               atIndex:AAPLVertexInputIndexViewportSize];
+        
+        [renderEncoder  setFragmentBuffer:_fragParams
+                                   offset:0
+                                  atIndex:0];
 
         // Set the texture object.  The AAPLTextureIndexBaseColor enum value corresponds
         ///  to the 'colorMap' argument in the 'samplingShader' function because its
         //   texture attribute qualifier also uses AAPLTextureIndexBaseColor for its index.
         [renderEncoder setFragmentTexture:_texture
                                   atIndex:AAPLTextureIndexBaseColor];
+        
+        [renderEncoder setFragmentTexture:_rChannelTex atIndex:AAPLTexRedChannel];
+        [renderEncoder setFragmentTexture:_gChannelTex atIndex:AAPLTexGreenChannel];
+        [renderEncoder setFragmentTexture:_bChannelTex atIndex:AAPLTexBlueChannel];
 
+        [renderEncoder setFragmentSamplerState:_samplerState atIndex:AAPLTextureIndexBaseColor];
+        [renderEncoder setFragmentSamplerState:_samplerState atIndex:AAPLTexRedChannel];
+        [renderEncoder setFragmentSamplerState:_samplerState atIndex:AAPLTexGreenChannel];
+        [renderEncoder setFragmentSamplerState:_samplerState atIndex:AAPLTexBlueChannel];
+        
         // Draw the triangles.
         [renderEncoder drawPrimitives:MTLPrimitiveTypeTriangle
                           vertexStart:0
@@ -185,10 +292,16 @@ Implementation of renderer class which performs Metal setup and per frame render
 
         // Schedule a present once the framebuffer is complete using the current drawable
         [commandBuffer presentDrawable:view.currentDrawable];
+        [commandBuffer addCompletedHandler:^(id<MTLCommandBuffer> buffer){
+            id<MTLTexture> curTex =  view.currentDrawable.texture;
+            //NSLog(@"wathch this time's texture!\n");
+        }];
+
     }
 
     // Finalize rendering here & push the command buffer to the GPU
     [commandBuffer commit];
+    
 }
 
 @end
